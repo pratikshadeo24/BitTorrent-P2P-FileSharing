@@ -9,7 +9,9 @@ class PeerConnection:
         self.peer_process = peer_process
         self.is_choked = True
         self.peer_choking = True
-        self.is_interested = False
+        # self.is_interested = False
+        self.is_interested_in_us = False  # Remote peer is interested in us
+        self.am_interested_in_peer = False  # We are interested in the remote peer
         self.peer_bitfield = [0] * self.peer_process.num_pieces
         self.pending_requests = []
         self.lock = threading.Lock()
@@ -59,8 +61,15 @@ class PeerConnection:
 
                 # Process the message
                 self.message_handler.handle_message(message_type, payload)
+            except (ConnectionAbortedError, ConnectionResetError, ConnectionError, OSError) as e:
+                print(f"Connection to Peer {self.peer_id} was closed: {e}")
+                # Optionally log the event
+                log_event(self.peer_process.peer_id, f"Connection to Peer {self.peer_id} was closed.")
+                break
             except Exception as e:
                 print(f"Error handling messages from Peer {self.peer_id}: {e}")
+                import traceback
+                traceback.print_exc()
                 break
         # Peer has disconnected
         with self.peer_process.lock:
@@ -91,3 +100,7 @@ class PeerConnection:
             self.socket.close()
         except Exception as e:
             print(f"Error closing connection to Peer {self.peer_id}: {e}")
+            # Remove the connection from self.peer_process.connections without holding self.peer_process.lock
+        with self.peer_process.lock:
+            if self.peer_id in self.peer_process.connections:
+                del self.peer_process.connections[self.peer_id]

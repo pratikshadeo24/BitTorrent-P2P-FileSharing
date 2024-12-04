@@ -20,14 +20,15 @@ class PeerProcess:
         self.num_pieces = self.calculate_num_pieces(config['file_size'], config['piece_size'])
         self.bitfield_manager = BitfieldManager(self.num_pieces)
         self.has_file = self.get_has_file_for_peer(peer_id)
+        self.has_complete_file = self.has_file
         if self.has_file:
             self.bitfield_manager.set_all()
             self.split_file_into_pieces()
         self.lock = threading.Lock()
         self.is_terminated = False
         self.preferred_neighbors = []
+        self.previous_preferred_neighbors = []
         self.optimistic_unchoke_neighbor = None
-        # Initialize logging
 
     def split_file_into_pieces(self):
         # Only split if the peer has the complete file
@@ -62,6 +63,7 @@ class PeerProcess:
                 with open(piece_path, 'rb') as infile:
                     outfile.write(infile.read())
         print(f"Reconstructed file saved at {file_path}")
+        self.has_complete_file = True  # Update the flag
         log_event(self.peer_id, f"Peer {self.peer_id} has downloaded the complete file.")
 
     def calculate_num_pieces(self, file_size, piece_size):
@@ -117,19 +119,69 @@ class PeerProcess:
             except Exception as e:
                 print(f"Error in unchoking_task: {e}")
 
+    # def select_preferred_neighbors(self):
+    #     with self.lock:
+    #         interested_peers = []
+    #         for conn in self.connections.values():
+    #             with conn.lock:
+    #                 if conn.is_interested_in_us:
+    #                     interested_peers.append(conn)
+    #         k = self.config['num_preferred_neighbors']
+    #
+    #         if self.has_file:
+    #             # Peer has the complete file, select randomly
+    #             preferred_neighbors = random.sample(interested_peers, min(k, len(interested_peers)))
+    #         else:
+    #             # Peer does not have the complete file, select based on download rates
+    #             # Sort interested peers by download rate in descending order
+    #             sorted_peers = sorted(interested_peers, key=lambda x: x.download_rate, reverse=True)
+    #             preferred_neighbors = sorted_peers[:k]
+    #
+    #         # Store the preferred neighbors
+    #         self.preferred_neighbors = preferred_neighbors
+    #
+    #         # Update choked status
+    #         for conn in self.connections.values():
+    #             if conn in self.preferred_neighbors or (self.optimistic_unchoke_neighbor == conn.peer_id):
+    #                 if conn.is_choked:
+    #                     conn.send_unchoke()
+    #             else:
+    #                 if not conn.is_choked:
+    #                     conn.send_choke()
+    #
+    #         # Log the preferred neighbors
+    #         neighbor_ids = [conn.peer_id for conn in self.preferred_neighbors]
+    #         log_event(self.peer_id, f"Peer {self.peer_id} has the preferred neighbors {neighbor_ids}")
+    #
+    #         # Reset download rates for the next interval
+    #         for conn in self.connections.values():
+    #             conn.download_rate = conn.downloaded_bytes / self.config['unchoking_interval']
+    #             conn.downloaded_bytes = 0
     def select_preferred_neighbors(self):
         with self.lock:
-            interested_peers = [conn for conn in self.connections.values() if conn.is_interested]
+            interested_peers = []
+            for conn in self.connections.values():
+                with conn.lock:
+                    if conn.is_interested_in_us:
+                        interested_peers.append(conn)
             k = self.config['num_preferred_neighbors']
 
-            if self.has_file:
+            if self.has_complete_file:
                 # Peer has the complete file, select randomly
                 preferred_neighbors = random.sample(interested_peers, min(k, len(interested_peers)))
             else:
                 # Peer does not have the complete file, select based on download rates
-                # Sort interested peers by download rate in descending order
                 sorted_peers = sorted(interested_peers, key=lambda x: x.download_rate, reverse=True)
                 preferred_neighbors = sorted_peers[:k]
+
+            # Compare with previous preferred neighbors
+            neighbor_ids = [conn.peer_id for conn in preferred_neighbors]
+            previous_neighbor_ids = [conn.peer_id for conn in self.previous_preferred_neighbors]
+
+            if set(neighbor_ids) != set(previous_neighbor_ids):
+                # Preferred neighbors have changed, log the event
+                log_event(self.peer_id, f"Peer {self.peer_id} has the preferred neighbors {neighbor_ids}")
+                self.previous_preferred_neighbors = preferred_neighbors.copy()
 
             # Store the preferred neighbors
             self.preferred_neighbors = preferred_neighbors
@@ -143,20 +195,32 @@ class PeerProcess:
                     if not conn.is_choked:
                         conn.send_choke()
 
-            # Log the preferred neighbors
-            neighbor_ids = [conn.peer_id for conn in self.preferred_neighbors]
-            log_event(self.peer_id, f"Peer {self.peer_id} has the preferred neighbors {neighbor_ids}")
-
             # Reset download rates for the next interval
             for conn in self.connections.values():
                 conn.download_rate = conn.downloaded_bytes / self.config['unchoking_interval']
                 conn.downloaded_bytes = 0
 
     def accept_incoming_connections(self):
-        while True:
-            client_socket, addr = self.server_socket.accept()
-            print(f"Accepted connection from {addr}")
-            threading.Thread(target=self.handle_incoming_connection, args=(client_socket,), daemon=True).start()
+        while not self.is_terminated:
+            try:
+                client_socket, addr = self.server_socket.accept()
+                print(f"Accepted connection from {addr}")
+                threading.Thread(target=self.handle_incoming_connection, args=(client_socket,), daemon=True).start()
+            except OSError as e:
+                if self.is_terminated:
+                    # Socket has been closed, exit the loop
+                    print("Server socket has been closed. Stopping accept_incoming_connections.")
+                    break
+                else:
+                    print(f"Error accepting connections: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    break  # Exit the loop on other OSError
+            except Exception as e:
+                print(f"Unexpected error accepting connections: {e}")
+                import traceback
+                traceback.print_exc()
+                break  # Exit the loop on unexpected exceptions
 
     def handle_incoming_connection(self, client_socket):
         from peer_connection import PeerConnection
@@ -175,7 +239,8 @@ class PeerProcess:
 
         # Create a PeerConnection instance
         peer_connection = PeerConnection(peer_id, client_socket, self)
-        self.connections[peer_id] = peer_connection
+        with self.lock:
+            self.connections[peer_id] = peer_connection
 
     def connect_to_peers(self):
         for peer in self.peer_info:
@@ -204,7 +269,8 @@ class PeerProcess:
 
             # Create a PeerConnection instance
             peer_connection = PeerConnection(peer['peer_id'], s, self)
-            self.connections[peer['peer_id']] = peer_connection
+            with self.lock:
+                self.connections[peer['peer_id']] = peer_connection
         except Exception as e:
             print(f"Error connecting to Peer {peer['peer_id']}: {e}")
 
@@ -220,10 +286,11 @@ class PeerProcess:
     def select_optimistic_unchoke_neighbor(self):
         with self.lock:
             # Find choked and interested peers not in preferred neighbors
-            choked_interested_peers = [
-                conn for conn in self.connections.values()
-                if conn.is_interested and conn.is_choked and conn not in self.preferred_neighbors
-            ]
+            choked_interested_peers = []
+            for conn in self.connections.values():
+                with conn.lock:
+                    if conn.is_interested_in_us and conn.is_choked and conn not in self.preferred_neighbors:
+                        choked_interested_peers.append(conn)
 
             if choked_interested_peers:
                 # Randomly select one peer to unchoke
@@ -239,28 +306,44 @@ class PeerProcess:
         while not self.is_terminated:
             time.sleep(5)  # Check every 5 seconds
             with self.lock:
-                if self.bitfield_manager.is_complete():
-                    all_peers_completed = all(
-                        conn.has_complete_file for conn in self.connections.values()
-                    )
-                    if all_peers_completed:
-                        self.terminate()
+                is_complete = self.bitfield_manager.is_complete()
+            if is_complete:
+                all_peers_completed = True
+                for peer in self.peer_info:
+                    peer_id = peer['peer_id']
+                    if peer_id == self.peer_id:
+                        continue  # Skip self
+                    with self.lock:
+                        conn = self.connections.get(peer_id)
+                    if conn:
+                        with conn.lock:
+                            if not conn.has_complete_file:
+                                all_peers_completed = False
+                                break
+                    else:
+                        # Assume the peer has not completed if not connected
+                        all_peers_completed = False
+                        break
+                if all_peers_completed:
+                    self.terminate()
 
     def terminate(self):
-        with self.lock:
-            if self.is_terminated:
-                return
-            self.is_terminated = True
-            # Log the completion event
+        if self.is_terminated:
+            return
+        self.is_terminated = True
+        # Log the completion event only if the peer didn't start with the complete file
+        if not self.has_file and self.has_complete_file:
             log_event(self.peer_id, f"Peer {self.peer_id} has downloaded the complete file.")
-            print(f"Peer {self.peer_id} has downloaded the complete file and is terminating.")
-            # Close all connections
-            for conn in self.connections.values():
-                conn.close()
-            # Close the server socket
-            self.server_socket.close()
-            # Exit the program
-            os._exit(0)
+        print(f"Peer {self.peer_id} is terminating.")
+        # Close all connections without holding self.lock
+        with self.lock:
+            connections = list(self.connections.values())
+        for conn in connections:
+            conn.close()
+        # Close the server socket
+        self.server_socket.close()
+        # Exit the program
+        sys.exit(0)
 
 
 def read_config_files():
@@ -279,6 +362,7 @@ def read_config_files():
         'file_size': int(config['FileSize']),
         'piece_size': int(config['PieceSize'])
     }
+
 
 def read_peer_info():
     peer_info = []

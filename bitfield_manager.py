@@ -1,27 +1,33 @@
-import math
+import threading
 
 class BitfieldManager:
     def __init__(self, num_pieces):
         self.num_pieces = num_pieces
         self.local_bitfield = [0] * num_pieces
+        self.lock = threading.Lock()
 
     def set_all(self):
         self.local_bitfield = [1] * self.num_pieces
 
     def update_bitfield(self, piece_index):
-        self.local_bitfield[piece_index] = 1
+        with self.lock:
+            self.local_bitfield[piece_index] = 1
 
     def is_complete(self):
-        return all(self.local_bitfield)
+        with self.lock:
+            return all(self.local_bitfield)
 
     def has_piece(self, piece_index):
-        return self.local_bitfield[piece_index] == 1
+        with self.lock:
+            return self.local_bitfield[piece_index] == 1
 
     def count_pieces(self):
-        return sum(self.local_bitfield)
+        with self.lock:
+            return sum(self.local_bitfield)
 
     def generate_bitfield_message(self):
-        bitfield_bytes = self.encode_bitfield(self.local_bitfield)
+        with self.lock:
+            bitfield_bytes = self.encode_bitfield(self.local_bitfield)
         message_length = (1 + len(bitfield_bytes)).to_bytes(4, 'big')
         message_type = b'\x05'  # bitfield type is 5
         return message_length + message_type + bitfield_bytes

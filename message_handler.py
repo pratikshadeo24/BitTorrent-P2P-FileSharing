@@ -64,13 +64,13 @@ class MessageHandler:
         print(f"Received 'interested' from Peer {self.peer_connection.peer_id}")
         log_event(self.peer_process.peer_id, f"Peer {self.peer_process.peer_id} received the 'interested' message from Peer {self.peer_connection.peer_id}")
         with self.peer_connection.lock:
-            self.peer_connection.is_interested = True
+            self.peer_connection.is_interested_in_us = True
 
     def handle_not_interested(self):
         print(f"Received 'not interested' from Peer {self.peer_connection.peer_id}")
         log_event(self.peer_process.peer_id, f"Peer {self.peer_process.peer_id} received the 'not interested' message from Peer {self.peer_connection.peer_id}")
         with self.peer_connection.lock:
-            self.peer_connection.is_interested = False
+            self.peer_connection.is_interested_in_us = False
 
     def handle_have(self, payload):
         piece_index = int.from_bytes(payload, 'big')
@@ -78,19 +78,21 @@ class MessageHandler:
         log_event(self.peer_process.peer_id,
                   f"Peer {self.peer_process.peer_id} received the 'have' message from Peer {self.peer_connection.peer_id} for the piece {piece_index}")
         # Update the peer's bitfield
-        self.peer_connection.peer_bitfield[piece_index] = 1
+        with self.peer_connection.lock:
+            self.peer_connection.peer_bitfield[piece_index] = 1
 
         # Check if the connected peer has the complete file
-        if all(self.peer_connection.peer_bitfield):
-            self.peer_connection.has_complete_file = True  # New line
+        with self.peer_connection.lock:
+            if all(self.peer_connection.peer_bitfield):
+                self.peer_connection.has_complete_file = True
 
         # Determine if we are now interested
         if not self.peer_process.bitfield_manager.has_piece(piece_index):
-            if not self.peer_connection.is_interested:
+            if not self.peer_connection.am_interested_in_peer:
                 self.send_interested()
         else:
             # Check if we are no longer interested in any pieces from this peer
-            if self.peer_connection.is_interested:
+            if self.peer_connection.am_interested_in_peer:
                 if not self.is_interested_in_peer():
                     self.send_not_interested()
 
@@ -140,13 +142,14 @@ class MessageHandler:
 
         # Check if all pieces are downloaded
         if self.peer_process.bitfield_manager.is_complete():
+            self.peer_process.has_complete_file = True  # Update the flag
             self.peer_process.assemble_file_from_pieces()
 
     def send_interested(self):
         message = (1).to_bytes(4, 'big') + b'\x02'
         self.peer_connection.socket.sendall(message)
         with self.peer_connection.lock:
-            self.peer_connection.is_interested = True
+            self.peer_connection.am_interested_in_peer = True
         print(f"Sent 'interested' to Peer {self.peer_connection.peer_id}")
         log_event(self.peer_process.peer_id,
                   f"Peer {self.peer_process.peer_id} sent 'interested' message to Peer {self.peer_connection.peer_id}")
@@ -155,22 +158,31 @@ class MessageHandler:
         message = (1).to_bytes(4, 'big') + b'\x03'
         self.peer_connection.socket.sendall(message)
         with self.peer_connection.lock:
-            self.peer_connection.is_interested = False
+            self.peer_connection.am_interested_in_peer = False
         print(f"Sent 'not interested' to Peer {self.peer_connection.peer_id}")
         log_event(self.peer_process.peer_id,
                   f"Peer {self.peer_process.peer_id} sent 'not interested' message to Peer {self.peer_connection.peer_id}")
 
     def send_have_to_all(self, piece_index):
         message = (5).to_bytes(4, 'big') + b'\x04' + piece_index.to_bytes(4, 'big')
-        for conn in self.peer_process.connections.values():
-            conn.socket.sendall(message)
-            print(f"Sent 'have' for piece {piece_index} to Peer {conn.peer_id}")
-            log_event(self.peer_process.peer_id,
-                      f"Peer {self.peer_process.peer_id} sent the 'have' message to Peer {conn.peer_id} for the piece {piece_index}")
+        with self.peer_process.lock:
+            connections = list(self.peer_process.connections.values())
+        for conn in connections:
+            try:
+                conn.socket.sendall(message)
+                print(f"Sent 'have' for piece {piece_index} to Peer {conn.peer_id}")
+                log_event(self.peer_process.peer_id,
+                          f"Peer {self.peer_process.peer_id} sent the 'have' message to Peer {conn.peer_id} for the piece {piece_index}")
+            except Exception as e:
+                print(f"Error sending 'have' message to Peer {conn.peer_id}: {e}")
 
     def is_interested_in_peer(self):
+        with self.peer_connection.lock:
+            peer_bitfield = self.peer_connection.peer_bitfield.copy()
+        with self.peer_process.bitfield_manager.lock:
+            local_bitfield = self.peer_process.bitfield_manager.local_bitfield.copy()
         for index in range(self.peer_process.num_pieces):
-            if self.peer_connection.peer_bitfield[index] == 1 and not self.peer_process.bitfield_manager.has_piece(index):
+            if peer_bitfield[index] == 1 and local_bitfield[index] == 0:
                 return True
         return False
 
@@ -190,11 +202,14 @@ class MessageHandler:
             self.send_not_interested()
 
     def select_piece(self):
-        with self.peer_process.lock:
-            missing_pieces = [
-                index for index in range(self.peer_process.num_pieces)
-                if not self.peer_process.bitfield_manager.has_piece(index) and self.peer_connection.peer_bitfield[index] == 1
-            ]
+        with self.peer_process.bitfield_manager.lock:
+            local_bitfield = self.peer_process.bitfield_manager.local_bitfield.copy()
+        with self.peer_connection.lock:
+            peer_bitfield = self.peer_connection.peer_bitfield.copy()
+        missing_pieces = [
+            index for index in range(self.peer_process.num_pieces)
+            if local_bitfield[index] == 0 and peer_bitfield[index] == 1
+        ]
         if missing_pieces:
             return random.choice(missing_pieces)
         return None
