@@ -5,9 +5,9 @@ from bitfield_manager import BitfieldManager
 
 
 class MessageHandler:
-    def __init__(self, peer_connection, peer_process):
+    def __init__(self, peer_connection):
         self.peer_connection = peer_connection
-        self.peer_process = peer_process
+        self.peer_process = peer_connection.peer_process
 
     @staticmethod
     def send_handshake(peer_socket, peer_id):
@@ -75,15 +75,30 @@ class MessageHandler:
     def handle_have(self, payload):
         piece_index = int.from_bytes(payload, 'big')
         print(f"Received 'have' from Peer {self.peer_connection.peer_id} for piece {piece_index}")
-        log_event(self.peer_process.peer_id, f"Peer {self.peer_process.peer_id} received the 'have' message from Peer {self.peer_connection.peer_id} for the piece {piece_index}")
+        log_event(self.peer_process.peer_id,
+                  f"Peer {self.peer_process.peer_id} received the 'have' message from Peer {self.peer_connection.peer_id} for the piece {piece_index}")
+        # Update the peer's bitfield
         self.peer_connection.peer_bitfield[piece_index] = 1
-        # If we don't have this piece, send 'interested'
+
+        # Check if the connected peer has the complete file
+        if all(self.peer_connection.peer_bitfield):
+            self.peer_connection.has_complete_file = True  # New line
+
+        # Determine if we are now interested
         if not self.peer_process.bitfield_manager.has_piece(piece_index):
-            self.send_interested()
+            if not self.peer_connection.is_interested:
+                self.send_interested()
+        else:
+            # Check if we are no longer interested in any pieces from this peer
+            if self.peer_connection.is_interested:
+                if not self.is_interested_in_peer():
+                    self.send_not_interested()
 
     def handle_bitfield(self, payload):
         self.peer_connection.peer_bitfield = BitfieldManager.decode_bitfield(payload, self.peer_process.num_pieces)
         print(f"Received bitfield from Peer {self.peer_connection.peer_id}: {self.peer_connection.peer_bitfield}")
+        log_event(self.peer_process.peer_id,
+                  f"Peer {self.peer_process.peer_id} received 'bitfield' message from Peer {self.peer_connection.peer_id}")
         # Determine if we are interested
         if self.is_interested_in_peer():
             self.send_interested()
@@ -93,6 +108,8 @@ class MessageHandler:
     def handle_request(self, payload):
         piece_index = int.from_bytes(payload, 'big')
         print(f"Received 'request' from Peer {self.peer_connection.peer_id} for piece {piece_index}")
+        log_event(self.peer_process.peer_id,
+                  f"Peer {self.peer_process.peer_id} received 'request' message from Peer {self.peer_connection.peer_id} for piece {piece_index}")
         # Send the piece if we have it
         if self.peer_process.bitfield_manager.has_piece(piece_index):
             self.send_piece(piece_index)
@@ -113,8 +130,6 @@ class MessageHandler:
             self.peer_connection.downloaded_bytes += len(piece_data)
             if piece_index in self.peer_connection.pending_requests:
                 self.peer_connection.pending_requests.remove(piece_index)
-            # Add the following line to update downloaded bytes
-            self.peer_connection.downloaded_bytes += len(piece_data)
         # Log the event
         num_pieces = self.peer_process.bitfield_manager.count_pieces()
         log_event(self.peer_process.peer_id, f"Peer {self.peer_process.peer_id} has downloaded the piece {piece_index} from Peer {self.peer_connection.peer_id}. Now the number of pieces it has is {num_pieces}")
@@ -130,19 +145,28 @@ class MessageHandler:
     def send_interested(self):
         message = (1).to_bytes(4, 'big') + b'\x02'
         self.peer_connection.socket.sendall(message)
+        with self.peer_connection.lock:
+            self.peer_connection.is_interested = True
         print(f"Sent 'interested' to Peer {self.peer_connection.peer_id}")
+        log_event(self.peer_process.peer_id,
+                  f"Peer {self.peer_process.peer_id} sent 'interested' message to Peer {self.peer_connection.peer_id}")
 
     def send_not_interested(self):
         message = (1).to_bytes(4, 'big') + b'\x03'
         self.peer_connection.socket.sendall(message)
+        with self.peer_connection.lock:
+            self.peer_connection.is_interested = False
         print(f"Sent 'not interested' to Peer {self.peer_connection.peer_id}")
+        log_event(self.peer_process.peer_id,
+                  f"Peer {self.peer_process.peer_id} sent 'not interested' message to Peer {self.peer_connection.peer_id}")
 
     def send_have_to_all(self, piece_index):
         message = (5).to_bytes(4, 'big') + b'\x04' + piece_index.to_bytes(4, 'big')
-        for peer_id, connection in self.peer_process.connections.items():
-            if peer_id != self.peer_connection.peer_id:
-                connection.socket.sendall(message)
-                print(f"Sent 'have' for piece {piece_index} to Peer {peer_id}")
+        for conn in self.peer_process.connections.values():
+            conn.socket.sendall(message)
+            print(f"Sent 'have' for piece {piece_index} to Peer {conn.peer_id}")
+            log_event(self.peer_process.peer_id,
+                      f"Peer {self.peer_process.peer_id} sent the 'have' message to Peer {conn.peer_id} for the piece {piece_index}")
 
     def is_interested_in_peer(self):
         for index in range(self.peer_process.num_pieces):
@@ -195,10 +219,15 @@ class MessageHandler:
             return None
 
     def save_piece(self, piece_index, piece_data):
-        dir_path = f"peer_{self.peer_process.peer_id}/pieces"
-        if not os.path.exists(dir_path):
-            os.makedirs(dir_path)
-        piece_path = os.path.join(dir_path, f"{piece_index}.dat")
-        with open(piece_path, 'wb') as piece_file:
-            piece_file.write(piece_data)
-        print(f"Saved piece {piece_index} to {piece_path}")
+        try:
+            dir_path = f"peer_{self.peer_process.peer_id}/pieces"
+            if not os.path.exists(dir_path):
+                os.makedirs(dir_path)
+            piece_path = os.path.join(dir_path, f"{piece_index}.dat")
+            with open(piece_path, 'wb') as piece_file:
+                piece_file.write(piece_data)
+            print(f"Saved piece {piece_index} to {piece_path}")
+        except IOError as e:
+            print(f"Error saving piece {piece_index}: {e}")
+            log_event(self.peer_process.peer_id, f"Error saving piece {piece_index}: {e}")
+

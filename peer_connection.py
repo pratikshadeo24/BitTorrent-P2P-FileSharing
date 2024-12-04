@@ -13,9 +13,10 @@ class PeerConnection:
         self.peer_bitfield = [0] * self.peer_process.num_pieces
         self.pending_requests = []
         self.lock = threading.Lock()
-        self.message_handler = MessageHandler(self, peer_process)
+        self.message_handler = MessageHandler(self)
         self.downloaded_bytes = 0  # Bytes downloaded in the current interval
         self.download_rate = 0  # Download rate in bytes per second
+        self.has_complete_file = False  # Indicates if the peer has the complete file
         # Send bitfield
         self.send_bitfield()
         print(f"Sent bitfield to Peer {self.peer_id}")
@@ -61,6 +62,13 @@ class PeerConnection:
             except Exception as e:
                 print(f"Error handling messages from Peer {self.peer_id}: {e}")
                 break
+        # Peer has disconnected
+        with self.peer_process.lock:
+            if self.peer_id in self.peer_process.connections:
+                del self.peer_process.connections[self.peer_id]
+        self.socket.close()
+        print(f"Connection to Peer {self.peer_id} closed.")
+        log_event(self.peer_process.peer_id, f"Peer {self.peer_process.peer_id} disconnected from Peer {self.peer_id}")
 
     def send_choke(self):
         message = (1).to_bytes(4, 'big') + b'\x00'  # Choke message
@@ -77,3 +85,9 @@ class PeerConnection:
             self.is_choked = False
         print(f"Sent 'unchoke' to Peer {self.peer_id}")
         log_event(self.peer_process.peer_id, f"Peer {self.peer_process.peer_id} unchoked Peer {self.peer_id}")
+
+    def close(self):
+        try:
+            self.socket.close()
+        except Exception as e:
+            print(f"Error closing connection to Peer {self.peer_id}: {e}")

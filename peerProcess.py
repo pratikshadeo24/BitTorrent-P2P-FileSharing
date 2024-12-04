@@ -8,8 +8,6 @@ from datetime import datetime
 from bitfield_manager import BitfieldManager
 from message_handler import MessageHandler
 from utils import recv_all, log_event
-
-
 class PeerProcess:
     def __init__(self, peer_id, peer_info, config):
         self.peer_id = peer_id
@@ -26,12 +24,10 @@ class PeerProcess:
             self.bitfield_manager.set_all()
             self.split_file_into_pieces()
         self.lock = threading.Lock()
+        self.is_terminated = False
         self.preferred_neighbors = []
         self.optimistic_unchoke_neighbor = None
-        self.log_file = f'log_peer_{self.peer_id}.log'
         # Initialize logging
-        self.setup_logging()
-
 
     def split_file_into_pieces(self):
         # Only split if the peer has the complete file
@@ -67,11 +63,6 @@ class PeerProcess:
                     outfile.write(infile.read())
         print(f"Reconstructed file saved at {file_path}")
         log_event(self.peer_id, f"Peer {self.peer_id} has downloaded the complete file.")
-
-    def setup_logging(self):
-        if not os.path.exists(self.log_file):
-            with open(self.log_file, 'w') as f:
-                pass  # Create the file
 
     def calculate_num_pieces(self, file_size, piece_size):
         """
@@ -112,14 +103,19 @@ class PeerProcess:
 
         threading.Thread(target=self.unchoking_task, daemon=True).start()
         threading.Thread(target=self.optimistic_unchoking_task, daemon=True).start()
+        # Start the completion check task
+        threading.Thread(target=self.completion_check_task, daemon=True).start()
         # Main loop
         while True:
             time.sleep(1)  # Prevents busy waiting
 
     def unchoking_task(self):
         while True:
-            time.sleep(self.config['unchoking_interval'])
-            self.select_preferred_neighbors()
+            try:
+                time.sleep(self.config['unchoking_interval'])
+                self.select_preferred_neighbors()
+            except Exception as e:
+                print(f"Error in unchoking_task: {e}")
 
     def select_preferred_neighbors(self):
         with self.lock:
@@ -163,6 +159,7 @@ class PeerProcess:
             threading.Thread(target=self.handle_incoming_connection, args=(client_socket,), daemon=True).start()
 
     def handle_incoming_connection(self, client_socket):
+        from peer_connection import PeerConnection
         # Receive handshake
         peer_id = MessageHandler.receive_handshake(client_socket)
         if peer_id is None:
@@ -186,6 +183,7 @@ class PeerProcess:
                 threading.Thread(target=self.establish_connection, args=(peer,), daemon=True).start()
 
     def establish_connection(self, peer):
+        from peer_connection import PeerConnection
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.connect((peer['host'], peer['port']))
@@ -213,8 +211,11 @@ class PeerProcess:
     # Additional methods for unchoking intervals, optimistic unchoking, etc.
     def optimistic_unchoking_task(self):
         while True:
-            time.sleep(self.config['optimistic_unchoking_interval'])
-            self.select_optimistic_unchoke_neighbor()
+            try:
+                time.sleep(self.config['optimistic_unchoking_interval'])
+                self.select_optimistic_unchoke_neighbor()
+            except Exception as e:
+                print(f"Error in optimistic_unchoking_task: {e}")
 
     def select_optimistic_unchoke_neighbor(self):
         with self.lock:
@@ -233,6 +234,33 @@ class PeerProcess:
                           f"Peer {self.peer_id} has the optimistically unchoked neighbor {optimistic_peer.peer_id}")
             else:
                 self.optimistic_unchoke_neighbor = None
+
+    def completion_check_task(self):
+        while not self.is_terminated:
+            time.sleep(5)  # Check every 5 seconds
+            with self.lock:
+                if self.bitfield_manager.is_complete():
+                    all_peers_completed = all(
+                        conn.has_complete_file for conn in self.connections.values()
+                    )
+                    if all_peers_completed:
+                        self.terminate()
+
+    def terminate(self):
+        with self.lock:
+            if self.is_terminated:
+                return
+            self.is_terminated = True
+            # Log the completion event
+            log_event(self.peer_id, f"Peer {self.peer_id} has downloaded the complete file.")
+            print(f"Peer {self.peer_id} has downloaded the complete file and is terminating.")
+            # Close all connections
+            for conn in self.connections.values():
+                conn.close()
+            # Close the server socket
+            self.server_socket.close()
+            # Exit the program
+            os._exit(0)
 
 
 def read_config_files():
@@ -265,9 +293,6 @@ def read_peer_info():
             })
     return peer_info
 
-
-# Import the PeerConnection class
-from peer_connection import PeerConnection
 
 # Main execution
 if __name__ == "__main__":
