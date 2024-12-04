@@ -226,7 +226,8 @@ class MessageHandler:
 
     def get_piece(self, piece_index):
         # Adjust the path to where your pieces are stored
-        piece_path = f"peer_{self.peer_process.peer_id}/pieces/{piece_index}.dat"
+        piece_filename = f"{piece_index}{self.peer_process.file_extension}"
+        piece_path = os.path.join(f"peer_{self.peer_process.peer_id}", "pieces", piece_filename)
         try:
             with open(piece_path, 'rb') as piece_file:
                 return piece_file.read()
@@ -238,7 +239,8 @@ class MessageHandler:
             dir_path = f"peer_{self.peer_process.peer_id}/pieces"
             if not os.path.exists(dir_path):
                 os.makedirs(dir_path)
-            piece_path = os.path.join(dir_path, f"{piece_index}.dat")
+            piece_filename = f"{piece_index}{self.peer_process.file_extension}"  # Use the file extension
+            piece_path = os.path.join(dir_path, piece_filename)
             with open(piece_path, 'wb') as piece_file:
                 piece_file.write(piece_data)
             print(f"Saved piece {piece_index} to {piece_path}")

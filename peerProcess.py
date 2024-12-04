@@ -13,6 +13,8 @@ class PeerProcess:
         self.peer_id = peer_id
         self.peer_info = peer_info
         self.config = config
+        self.file_name = self.config['file_name']
+        self.file_extension = os.path.splitext(self.file_name)[1]
         self.host = self.get_host_for_peer(peer_id)
         self.port = self.get_port_for_peer(peer_id)
         self.connections = {}  # Key: peer_id, Value: PeerConnection instance
@@ -49,7 +51,8 @@ class PeerProcess:
             start = i * piece_size
             end = min(start + piece_size, len(data))
             piece_data = data[start:end]
-            piece_path = os.path.join(dir_path, f"{i}.dat")
+            piece_filename = f"{i}{self.file_extension}"  # Use the file extension
+            piece_path = os.path.join(dir_path, piece_filename)
             with open(piece_path, 'wb') as piece_file:
                 piece_file.write(piece_data)
         print(f"Split file into {num_pieces} pieces in {dir_path}")
@@ -59,7 +62,8 @@ class PeerProcess:
         file_path = f"peer_{self.peer_id}/{self.config['file_name']}"
         with open(file_path, 'wb') as outfile:
             for i in range(self.num_pieces):
-                piece_path = os.path.join(dir_path, f"{i}.dat")
+                piece_filename = f"{i}{self.file_extension}"  # Use the file extension
+                piece_path = os.path.join(dir_path, piece_filename)
                 with open(piece_path, 'rb') as infile:
                     outfile.write(infile.read())
         print(f"Reconstructed file saved at {file_path}")
