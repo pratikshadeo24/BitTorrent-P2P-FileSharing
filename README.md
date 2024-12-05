@@ -16,6 +16,7 @@ This project is a Peer-to-Peer (P2P) file-sharing software inspired by the BitTo
 * __Choking/Unchoking:__ Implements preferred and optimistic unchoking for optimal data sharing.
 * __Logging:__ Logs peer activities for auditing and debugging.
 * __Dynamic Peer Connections:__ Supports establishing and managing connections with multiple peers.
+* __Optimistically Unchoked Neighbor:__ Periodically selects a random choked but interested peer to unchoke, ensuring fairness and encouraging participation in the network.
 
 ## File Structure ##
 
@@ -78,12 +79,11 @@ Example:
 1. Clone the repository: <br/>
   ```commandline
   git clone <repository_url>
-  cd P2PFileSharing
+  cd BITTORRENT-P2P-FILESHARING
   ```
 2. Prepare configuration files:<br/>
     * Edit Common.cfg and PeerInfo.cfg with your setup. 
 3. Create directories: <br/>
-    * Ensure a logs/ directory exists for peer logs.
     * Each peer will create a peer_<peer_id>/pieces directory to store file pieces.
 
 ### Running the Program ###
